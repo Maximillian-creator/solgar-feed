@@ -1,0 +1,52 @@
+name: Solgar + Viridian Feed Updater
+
+# Solgars eigen feeds, met de beschikbaarheid uit hun B2B (zie scraper.py).
+# Stock Sync leest "Viridian Update" om 03:00 en "Solgar Update" om 03:30 NL. GitHub start
+# geplande runs tot 6 uur te laat (gemeten bij vitortho-feed 01-05/10), dus vroeg:
+# 18:47 UTC (20:47 NL zomer) is ook met 6 uur vertraging vóór 03:00 NL klaar; 08:47 UTC
+# ververst overdag. Op :47: niet op het hele uur (dan is GitHub het drukst) en niet
+# tegelijk met vitortho-feed (:37).
+on:
+  schedule:
+    - cron: "47 18 * * *"
+    - cron: "47 8 * * *"
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [scraper.py]
+
+permissions:
+  contents: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      - name: Python instellen
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dependencies installeren
+        run: pip install -r requirements.txt
+      - name: Tests
+        run: pip install pytest && python -m pytest -q test_feed.py
+      - name: Scraper draaien
+        env:
+          SOLGAR_GEBRUIKER: ${{ secrets.SOLGAR_GEBRUIKER }}
+          SOLGAR_WACHTWOORD: ${{ secrets.SOLGAR_WACHTWOORD }}
+        run: python scraper.py
+      # Ook als de rem één feed tegenhield: de andere is dan wél vers weggeschreven en
+      # moet mee. Mislukte het inloggen, dan is er niets veranderd en volgt geen commit.
+      # De run blijft rood, zodat Nebula het ziet.
+      - name: XML committen en pushen
+        if: ${{ !cancelled() }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add solgar_feed.xml viridian_feed.xml verschillen.csv
+          git diff --staged --quiet || git commit -m "🔄 Feed bijgewerkt: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          git pull --rebase origin main
+          git push
