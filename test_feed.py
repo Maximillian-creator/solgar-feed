@@ -171,3 +171,68 @@ def test_verwerk_en_de_rem():
         scraper.verwerk("solgar", _feed()[:-12], 200, _b2b())
     # 05-10 werkelijk: 27 van 226 niet leverbaar (12%) en 2 niet gevonden: gaat door
     scraper.verwerk("solgar", _feed(), 200, _b2b(nee={f"{i:04d}" for i in range(36)}, weg={"0298", "0299"}))
+
+
+# ── noodroute (22-10): solgar.nl 403, B2B bereikbaar ───────────────────────────
+
+def _noodroute_opzet(tmp_path, monkeypatch, *, stempel_dagen=None, basis=None, git_dagen=None):
+    monkeypatch.chdir(tmp_path)
+    nu = 1_800_000_000.0
+    for oud in ("solgar_feed.xml", scraper.BASIS_STEMPEL):
+        if (tmp_path / oud).exists():
+            (tmp_path / oud).unlink()
+    if basis is not None:
+        (tmp_path / "solgar_feed.xml").write_text(basis, encoding="utf-8")
+    if stempel_dagen is not None:
+        t = nu - stempel_dagen * 86400
+        (tmp_path / scraper.BASIS_STEMPEL).write_text(
+            '{"solgar": "%s"}' % __import__("time").strftime("%Y-%m-%dT%H:%M:%SZ", __import__("time").gmtime(t)))
+    monkeypatch.setattr(scraper, "_git_tijd", lambda b: (nu - git_dagen * 86400) if git_dagen is not None else None)
+
+    def kapot(url):
+        raise scraper.requests.HTTPError("403 Client Error: Forbidden")
+    monkeypatch.setattr(scraper, "haal_feed", kapot)
+    return nu
+
+
+def test_noodroute_neemt_eigen_feed_als_solgar_403_geeft(tmp_path, monkeypatch):
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=3, basis=_feed())
+    xml, bron = scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+    assert xml == _feed() and bron.startswith("noodroute (3.0 d)")
+
+
+def test_noodroute_stopt_na_veertien_dagen(tmp_path, monkeypatch):
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=15, basis=_feed())
+    with pytest.raises(SystemExit, match="15 dagen"):
+        scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+
+
+def test_noodroute_zonder_stempel_gebruikt_git_en_legt_die_vast(tmp_path, monkeypatch):
+    # de eerste noodroute: geen basis.json, wel een commit van 4 dagen oud → mag, en de stempel
+    # blijft daarna op die datum staan (anders schuift de grens elke noodroute-commit mee)
+    nu = _noodroute_opzet(tmp_path, monkeypatch, git_dagen=4, basis=_feed())
+    xml, bron = scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+    assert bron.startswith("noodroute (4.0 d)")
+    assert abs(scraper.basis_leeftijd_dagen("solgar", "solgar_feed.xml", nu=nu) - 4.0) < 0.01
+    monkeypatch.setattr(scraper, "_git_tijd", lambda b: nu)        # nieuwe commit door de noodroute zelf
+    assert abs(scraper.basis_leeftijd_dagen("solgar", "solgar_feed.xml", nu=nu) - 4.0) < 0.01
+
+
+def test_noodroute_weigert_zonder_ouderdom_of_zonder_bestand(tmp_path, monkeypatch):
+    nu = _noodroute_opzet(tmp_path, monkeypatch, basis=_feed())                  # geen stempel, geen git
+    with pytest.raises(SystemExit, match="ouderdom"):
+        scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=1)                # geen bestand
+    with pytest.raises(SystemExit, match="ontbreekt"):
+        scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=1, basis=_feed()[:-12])   # afgebroken
+    with pytest.raises(SystemExit, match="afgebroken"):
+        scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+
+
+def test_gewone_route_zet_de_stempel(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(scraper, "haal_feed", lambda url: _feed())
+    xml, bron = scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=1_800_000_000.0)
+    assert bron == "solgar.nl" and xml == _feed()
+    assert abs(scraper.basis_leeftijd_dagen("solgar", "solgar_feed.xml", nu=1_800_000_000.0)) < 0.01

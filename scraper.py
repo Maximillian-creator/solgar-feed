@@ -41,7 +41,9 @@ from __future__ import annotations
 
 import csv
 import html
+import json
 import os
+import subprocess
 import re
 import sys
 import time
@@ -82,6 +84,97 @@ def haal_feed(url: str) -> str:
     r = requests.get(url, timeout=120, headers={"User-Agent": UA})
     r.raise_for_status()
     return r.content.decode("utf-8")
+
+
+# ── noodroute (22-10-2026) ───────────────────────────────────────────────────
+# Sinds 19-10 geeft www.solgar.nl een 403 aan datacenter-adressen (GitHub-runners en de VPS),
+# terwijl de B2B gewoon bereikbaar is. Drie dagen lang las Stock Sync daardoor een feed van 18-10.
+# Noodroute: lukt het ophalen van Solgars feed niet, dan is de laatst weggeschreven feed de basis
+# en wordt alleen `<available>` opnieuw uit de B2B gezet. Prijzen en assortiment wachten dan tot
+# solgar.nl weer open is; Nebula blijft dat melden. `basis.json` onthoudt wanneer de basis voor het
+# laatst écht bij Solgar vandaan kwam, zodat de noodroute na NOODROUTE_MAX_DAGEN stopt in plaats van
+# stilletjes op een stokoude basis door te draaien.
+
+BASIS_STEMPEL = "basis.json"
+NOODROUTE_MAX_DAGEN = 14
+
+
+def _lees_stempel() -> dict:
+    try:
+        with open(BASIS_STEMPEL, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _schrijf_stempel(stempel: dict) -> None:
+    with open(BASIS_STEMPEL, "w", encoding="utf-8", newline="") as f:
+        json.dump(stempel, f, indent=1, sort_keys=True)
+        f.write("\n")
+
+
+def _git_tijd(bestand: str) -> float | None:
+    """Wanneer het bestand voor het laatst gecommit is (voor de eerste noodroute, zonder stempel)."""
+    try:
+        uit = subprocess.run(["git", "log", "-1", "--format=%ct", "--", bestand],
+                             capture_output=True, text=True, timeout=30)
+        return float(uit.stdout.strip()) if uit.returncode == 0 and uit.stdout.strip() else None
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+
+
+def basis_leeftijd_dagen(naam: str, bestand: str, nu: float | None = None) -> float | None:
+    """Hoe oud de laatste échte Solgar-basis is: uit de stempel, anders uit git. None = onbekend."""
+    nu = nu or time.time()
+    stempel = _lees_stempel().get(naam)
+    if stempel:
+        try:
+            t = time.mktime(time.strptime(stempel, "%Y-%m-%dT%H:%M:%SZ")) - time.timezone
+            return (nu - t) / 86400
+        except ValueError:
+            pass
+    t = _git_tijd(bestand)
+    return (nu - t) / 86400 if t else None
+
+
+def basis_feed(naam: str, url: str, bestand: str, nu: float | None = None) -> tuple[str, str]:
+    """De basis voor één merk: Solgars feed, of via de noodroute onze laatste versie.
+    Geeft (xml, bron). Gooit SystemExit als er geen betrouwbare basis is."""
+    try:
+        xml = haal_feed(url)
+    except requests.RequestException as e:
+        fout = str(e)[:120]
+    else:
+        stempel = _lees_stempel()
+        stempel[naam] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(nu or time.time()))
+        _schrijf_stempel(stempel)
+        return xml, "solgar.nl"
+    stempel = _lees_stempel()
+    if naam not in stempel:
+        # eerste noodroute zonder stempel: de commit-tijd van het bestand is de laatste echte basis;
+        # vastleggen, anders schuift die datum bij elke noodroute-commit mee en stopt de grens nooit
+        t = _git_tijd(bestand)
+        if t:
+            stempel[naam] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+            _schrijf_stempel(stempel)
+    leeftijd = basis_leeftijd_dagen(naam, bestand, nu)
+    print(f"NOODROUTE {naam}: Solgars feed niet op te halen ({fout}).", file=sys.stderr)
+    if leeftijd is None:
+        raise SystemExit(f"STOP {naam}: noodroute niet mogelijk, ouderdom van {bestand} onbekend "
+                         f"(geen {BASIS_STEMPEL}, geen git). Geen feed weggeschreven.")
+    if leeftijd > NOODROUTE_MAX_DAGEN:
+        raise SystemExit(f"STOP {naam}: noodroute gestopt, de laatste echte Solgar-basis is {leeftijd:.0f} dagen "
+                         f"oud (grens {NOODROUTE_MAX_DAGEN}). Solgar.nl moet weer open; geen feed weggeschreven.")
+    try:
+        with open(bestand, encoding="utf-8") as f:
+            xml = f.read()
+    except OSError:
+        raise SystemExit(f"STOP {naam}: noodroute niet mogelijk, {bestand} ontbreekt. Geen feed weggeschreven.")
+    if afgekapt(xml):
+        raise SystemExit(f"STOP {naam}: noodroute niet mogelijk, {bestand} is afgebroken. Geen feed weggeschreven.")
+    print(f"NOODROUTE {naam}: basis = onze {bestand}, Solgar-basis van {leeftijd:.1f} dagen oud; "
+          f"alleen <available> wordt uit de B2B ververst.", file=sys.stderr)
+    return xml, f"noodroute ({leeftijd:.1f} d)"
 
 
 def _veld(blok: str, naam: str) -> str:
@@ -327,7 +420,15 @@ def verwerk(naam: str, xml: str, minimum: int, b2b: dict[str, dict]) -> tuple[st
 def main() -> None:
     start = time.time()
     print("Solgar + Viridian UPDATE-feeds (beschikbaarheid uit de B2B) gestart\n")
-    feeds = {naam: haal_feed(url) for naam, (url, _, _) in FEEDS.items()}
+    feeds, bronnen, fouten = {}, {}, []
+    for naam, (url, bestand, _) in FEEDS.items():
+        try:
+            feeds[naam], bronnen[naam] = basis_feed(naam, url, bestand)
+        except SystemExit as e:
+            print(e, file=sys.stderr)
+            fouten.append(naam)
+    if not feeds:
+        raise SystemExit("STOP: geen enkele basis (Solgar noch noodroute). Geen feed weggeschreven.")
     sessie = requests.Session()
     sessie.headers["User-Agent"] = UA
     login(sessie)
@@ -336,8 +437,10 @@ def main() -> None:
     print(f"B2B: {len(b2b)} producten gelezen")
     if len(b2b) < MIN_B2B:
         raise SystemExit(f"STOP: de B2B toont maar {len(b2b)} producten (ondergrens {MIN_B2B}). Geen feed weggeschreven.")
-    verschillen, fouten = [], []
+    verschillen = []
     for naam, (_, bestand, minimum) in FEEDS.items():
+        if naam not in feeds:
+            continue
         try:
             nieuw, verschil, telling = verwerk(naam, feeds[naam], minimum, b2b)
         except SystemExit as e:
@@ -348,7 +451,7 @@ def main() -> None:
             f.write(nieuw)
         verschillen += verschil
         print(f"{naam}: {telling['Ja']} Ja, {telling['Nee']} Nee (waarvan {telling['niet_gevonden']} niet in de B2B), "
-              f"{telling[None]} onbepaald → {bestand}; {len(verschil)} anders dan Solgars eigen feed")
+              f"{telling[None]} onbepaald → {bestand}; {len(verschil)} anders dan de basis ({bronnen[naam]})")
     if not fouten:
         with open(VERSCHILLEN_FILE, "w", encoding="utf-8", newline="") as f:
             w = csv.DictWriter(f, fieldnames=["merk", "artikelnummer", "product", "inhoud", "solgar_feed", "b2b", "b2b_ziet"])
