@@ -201,9 +201,12 @@ def test_noodroute_neemt_eigen_feed_als_solgar_403_geeft(tmp_path, monkeypatch):
     assert xml == _feed() and bron.startswith("noodroute (3.0 d)")
 
 
-def test_noodroute_stopt_na_veertien_dagen(tmp_path, monkeypatch):
-    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=15, basis=_feed())
-    with pytest.raises(SystemExit, match="15 dagen"):
+def test_noodroute_stopt_na_zestig_dagen(tmp_path, monkeypatch):
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=59, basis=_feed())
+    xml, bron = scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
+    assert xml == _feed() and bron.startswith("noodroute (59.0 d)")
+    nu = _noodroute_opzet(tmp_path, monkeypatch, stempel_dagen=61, basis=_feed())
+    with pytest.raises(SystemExit, match="61 dagen"):
         scraper.basis_feed("solgar", "https://x", "solgar_feed.xml", nu=nu)
 
 

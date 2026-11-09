@@ -96,7 +96,7 @@ def haal_feed(url: str) -> str:
 # stilletjes op een stokoude basis door te draaien.
 
 BASIS_STEMPEL = "basis.json"
-NOODROUTE_MAX_DAGEN = 14
+NOODROUTE_MAX_DAGEN = 60     # was 14; Max 09-11-2026: solgar.nl blijft dicht, liever verse beschikbaarheid (tot 21-12)
 
 
 def _lees_stempel() -> dict:
