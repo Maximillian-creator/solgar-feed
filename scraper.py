@@ -69,6 +69,12 @@ GEEN_CATEGORIE = {"info", "account", "besteltraject", "assortiment", "login", "d
 
 MIN_B2B = 300                 # 05-10: 405 producten (225 Solgar + 180 Viridian)
 MAX_NIET_GEVONDEN_PCT = 5
+# 25-11: in de noodroute is de basis onze eigen feed van 22-10. Wat Solgar sindsdien uit de B2B haalt,
+# blijft daarin staan en telt mee als "niet gevonden" (16-10 t/m 24-11: één voor één 0570, 0931, 3560,
+# 1733, 0916, 0195, 1081 …). Op 24-11 werd het 12 van 226 (5,3%) en stopte de feed, terwijl de B2B
+# gewoon gelezen werd (396 producten, alle categorieën). Een leesfout laat er tientallen tegelijk
+# verdwijnen; MIN_B2B blijft die vangen. Met een verse Solgar-feed geldt weer 5%.
+MAX_NIET_GEVONDEN_NOODROUTE_PCT = 10
 MAX_ONBEPAALD_PCT = 5
 MAX_NIET_LEVERBAAR_PCT = 30
 PAUZE_S = 0.8
@@ -380,13 +386,14 @@ def lees_b2b(sessie: requests.Session) -> dict[str, dict]:
 
 # ── samen ────────────────────────────────────────────────────────────────────
 
-def keur(naam: str, n_feed: int, minimum: int, oordeel: dict[str, str | None], niet_gevonden: int) -> None:
+def keur(naam: str, n_feed: int, minimum: int, oordeel: dict[str, str | None], niet_gevonden: int,
+         grens_niet_gevonden: int = MAX_NIET_GEVONDEN_PCT) -> None:
     """De rem voor één feed. Gooit SystemExit en dan wordt die feed niet weggeschreven."""
     if n_feed < minimum:
         raise SystemExit(f"STOP {naam}: Solgars feed heeft maar {n_feed} varianten (ondergrens {minimum}).")
-    if niet_gevonden * 100 > MAX_NIET_GEVONDEN_PCT * n_feed:
+    if niet_gevonden * 100 > grens_niet_gevonden * n_feed:
         raise SystemExit(f"STOP {naam}: {niet_gevonden} van {n_feed} varianten niet in de B2B gevonden "
-                         f"(grens {MAX_NIET_GEVONDEN_PCT}%, normaal ~1%). Waarschijnlijk klopt het lezen niet.")
+                         f"(grens {grens_niet_gevonden}%, normaal ~1%). Waarschijnlijk klopt het lezen niet.")
     onbepaald = sum(1 for o in oordeel.values() if o is None)
     if onbepaald * 100 > MAX_ONBEPAALD_PCT * n_feed:
         raise SystemExit(f"STOP {naam}: {onbepaald} van {n_feed} varianten onbepaald (grens {MAX_ONBEPAALD_PCT}%).")
@@ -396,14 +403,19 @@ def keur(naam: str, n_feed: int, minimum: int, oordeel: dict[str, str | None], n
                          f"{MAX_NIET_LEVERBAAR_PCT}%, normaal ~12%). Waarschijnlijk klopt het lezen niet.")
 
 
-def verwerk(naam: str, xml: str, minimum: int, b2b: dict[str, dict]) -> tuple[str, list[dict], dict]:
+def verwerk(naam: str, xml: str, minimum: int, b2b: dict[str, dict],
+            noodroute: bool = False) -> tuple[str, list[dict], dict]:
     """Nieuwe feed + verschillenlijst voor één merk. Gooit SystemExit via de rem."""
     if afgekapt(xml):
         raise SystemExit(f"STOP {naam}: Solgars feed is afgebroken (</catalog> ontbreekt).")
     lijst = varianten(xml)
     oordeel = {v["artikel"]: oordeel_van(b2b.get(v["artikel"])) for v in lijst}
-    niet_gevonden = sum(1 for v in lijst if v["artikel"] not in b2b)
-    keur(naam, len(lijst), minimum, oordeel, niet_gevonden)
+    weg = [v for v in lijst if v["artikel"] not in b2b]
+    niet_gevonden = len(weg)
+    if weg:
+        print(f"{naam}: niet in de B2B: " + ", ".join(f"{v['artikel']} {v['naam']} {v['inhoud']}".strip() for v in weg))
+    keur(naam, len(lijst), minimum, oordeel, niet_gevonden,
+         MAX_NIET_GEVONDEN_NOODROUTE_PCT if noodroute else MAX_NIET_GEVONDEN_PCT)
     verschil = []
     for v in lijst:
         o = oordeel[v["artikel"]]
@@ -442,7 +454,7 @@ def main() -> None:
         if naam not in feeds:
             continue
         try:
-            nieuw, verschil, telling = verwerk(naam, feeds[naam], minimum, b2b)
+            nieuw, verschil, telling = verwerk(naam, feeds[naam], minimum, b2b, noodroute=bronnen[naam] != "solgar.nl")
         except SystemExit as e:
             print(e, file=sys.stderr)
             fouten.append(naam)

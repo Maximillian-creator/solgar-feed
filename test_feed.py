@@ -173,6 +173,19 @@ def test_verwerk_en_de_rem():
     scraper.verwerk("solgar", _feed(), 200, _b2b(nee={f"{i:04d}" for i in range(36)}, weg={"0298", "0299"}))
 
 
+def test_noodroute_mag_tot_tien_procent_niet_gevonden():
+    """25-11: in de noodroute blijven producten die Solgar uit de B2B haalt in onze basis staan.
+    24-11 werkelijk: 12 van 226 (5,3%) → feed stopte. Noodroute: grens 10%; verse feed: 5%."""
+    weg12 = {f"{i:04d}" for i in range(16)}                           # 16/300 = 5,3%
+    with pytest.raises(SystemExit):
+        scraper.verwerk("solgar", _feed(), 200, _b2b(weg=weg12))
+    _, _, telling = scraper.verwerk("solgar", _feed(), 200, _b2b(weg=weg12), noodroute=True)
+    assert telling["niet_gevonden"] == 16 and telling["Nee"] == 16    # niet gevonden = niet leverbaar
+    scraper.verwerk("solgar", _feed(), 200, _b2b(weg={f"{i:04d}" for i in range(30)}), noodroute=True)  # 10%
+    with pytest.raises(SystemExit):                                   # 31/300 > 10%: ook in de noodroute stop
+        scraper.verwerk("solgar", _feed(), 200, _b2b(weg={f"{i:04d}" for i in range(31)}), noodroute=True)
+
+
 # ── noodroute (22-10): solgar.nl 403, B2B bereikbaar ───────────────────────────
 
 def _noodroute_opzet(tmp_path, monkeypatch, *, stempel_dagen=None, basis=None, git_dagen=None):
